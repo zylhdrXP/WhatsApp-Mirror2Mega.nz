@@ -1,5 +1,5 @@
 <div align="center">
-<img src="https://i.ibb.co/L5T1bFp/undraw-Cloud-hosting-715-A.png" alt="WhatsApp Mirror Bot Banner" width="250"/>
+<img src="https://qu.ax/ZmXOB.png" alt="WhatsApp Mirror Bot Banner" width="250"/>
 <h1 align="center">🚀 WhatsApp Mirror Bot</h1>
 <p align="center">
 Ubah WhatsApp Anda menjadi alat mirroring file canggih! <br />
