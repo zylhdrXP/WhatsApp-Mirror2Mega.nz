@@ -1,4 +1,3 @@
-```markdown
 <div align="center">
   <img src="https://qu.ax/ZmXOB.png" alt="WhatsApp Mirror Bot Banner" width="250" />
   <h1>🚀 WhatsApp Mirror Bot</h1>
