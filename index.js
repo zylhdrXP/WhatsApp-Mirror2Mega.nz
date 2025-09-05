@@ -105,12 +105,16 @@ async function startBot() {
             try {
                 // Download file
                 const res = await fetch(url);
-                if (!res.ok) return sock.sendMessage(from, { text: "❌ Gagal mengunduh file!" });
+if (!res.ok) return sock.sendMessage(from, { text: "❌ Gagal mengunduh file!" });
 
-                const buffer = await res.buffer();
-                fs.writeFileSync(filePath, buffer);
+const fileStream = fs.createWriteStream(filePath);
+await new Promise((resolve, reject) => {
+  res.body.pipe(fileStream);
+  res.body.on('error', reject);
+  fileStream.on('finish', resolve);
+});
 
-                await sock.sendMessage(from, { text: "📤 Mengunggah ke MEGA.nz..." });
+await sock.sendMessage(from, { text: "📤 Mengunggah ke MEGA.nz..." });
 
                 // Upload ke MEGA.nz
                 const uploaded = await uploadToMega(filePath);
