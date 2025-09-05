@@ -1,0 +1,29 @@
+{
+  "name": "bot-mirror",
+  "version": "1.0.0",
+  "description": "Bot WhatsApp Mirror File ke MEGA.nz",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": [
+    "bot",
+    "whatsapp",
+    "baileys",
+    "mirror",
+    "mega"
+  ],
+  "author": "Ziyau Latif Alhaidar",
+  "license": "MIT",
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.19",
+    "@hapi/boom": "^10.0.1",
+    "chalk": "4.1.2",
+    "fs-extra": "^11.2.0",
+    "megajs": "^1.3.9",
+    "mime-types": "^2.1.35",
+    "node-fetch": "^2.6.7",
+    "pino": "^8.15.0",
+    "qrcode-terminal": "^0.12.0"
+  }
+}
