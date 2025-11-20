@@ -1,11 +1,11 @@
 const {
-    default: makeWASocket,
-    useMultiFileAuthState,
-    fetchLatestBaileysVersion,
-    makeCacheableSignalKeyStore,
-    jidNormalizedUser,
-    DisconnectReason,
-    Browsers
+  default: makeWASocket,
+  useMultiFileAuthState,
+  fetchLatestBaileysVersion,
+  makeCacheableSignalKeyStore,
+  jidNormalizedUser,
+  DisconnectReason,
+  Browsers
 } = require("@whiskeysockets/baileys");
 const fs = require("fs");
 const path = require("path");
@@ -14,126 +14,183 @@ const fetch = require("node-fetch");
 const qrcode = require("qrcode-terminal");
 const chalk = require("chalk");
 const readline = require("readline");
-const { Boom } = require("@hapi/boom");
 const { uploadToMega, restoreTimers } = require("./mega");
 
-const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout
-});
+const DOWNLOAD_DIR = path.join(__dirname, "downloads");
 
-const tempDir = path.join(__dirname, "tempFile");
-if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
-
-let pairingStarted = false;
-let phoneNumber = null;
-
-async function startBot() {
-    const { state, saveCreds } = await useMultiFileAuthState("session");
-    const { version } = await fetchLatestBaileysVersion();
-
-    const sock = makeWASocket({
-        logger: pino({ level: "silent" }),
-        printQRInTerminal: false,
-        browser: Browsers.ubuntu("Chrome"),
-        auth: {
-            creds: state.creds,
-            keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "silent" }))
-        },
-    });
-
-    sock.ev.on("creds.update", saveCreds);
-
-    // Pairing code flow
-    if (!sock.authState.creds.registered && !pairingStarted) {
-        pairingStarted = true;
-        rl.question("📱 Masukkan nomor WhatsApp (contoh: 6285xxxx): ", async (num) => {
-            phoneNumber = num.replace(/[^0-9]/g, "");
-            if (phoneNumber.length < 8) {
-                console.log(chalk.red("❌ Nomor WhatsApp tidak valid!"));
-                process.exit(1);
-            }
-
-            try {
-                console.log(chalk.blue("\n🔗 Meminta kode pairing..."));
-                const code = await sock.requestPairingCode(phoneNumber);
-                console.log(
-                    chalk.green(`\n✅ Kode pairing Anda: ${code}\n`) +
-                    chalk.yellow("⚡ Buka WhatsApp Web/Desktop → Gunakan kode pairing ini!\n")
-                );
-            } catch (err) {
-                console.error(chalk.red("❌ Gagal membuat pairing code:"), err);
-                process.exit(1);
-            }
-        });
-    }
-
-    sock.ev.on("connection.update", async (update) => {
-        const { connection, lastDisconnect } = update;
-
-        if (connection === "close") {
-            const reason = new Boom(lastDisconnect?.error)?.output.statusCode;
-            console.log(chalk.red(`❌ Koneksi terputus (${reason}). Reconnecting...`));
-            startBot();
-        } else if (connection === "open") {
-            console.log(chalk.green("✅ Berhasil terhubung ke WhatsApp!"));
-        }
-    });
-
-    // Handle pesan masuk
-    sock.ev.on("messages.upsert", async ({ messages }) => {
-        const m = messages[0];
-        if (!m.message || m.key.fromMe) return;
-
-        const from = m.key.remoteJid;
-        const type = Object.keys(m.message)[0];
-        const body =
-            m.message.conversation ||
-            m.message[type]?.caption ||
-            m.message[type]?.text ||
-            "";
-
-        if (body.startsWith(".mirror ")) {
-            const url = body.split(" ")[1];
-            if (!url) return sock.sendMessage(from, { text: "❌ Masukkan URL!" });
-
-            const fileName = path.basename(url);
-            const filePath = path.join(tempDir, fileName);
-
-            await sock.sendMessage(from, { text: "⏳ Sedang mengunduh file..." });
-
-            try {
-                // Download file
-                const res = await fetch(url);
-if (!res.ok) return sock.sendMessage(from, { text: "❌ Gagal mengunduh file!" });
-
-const fileStream = fs.createWriteStream(filePath);
-await new Promise((resolve, reject) => {
-  res.body.pipe(fileStream);
-  res.body.on('error', reject);
-  fileStream.on('finish', resolve);
-});
-
-await sock.sendMessage(from, { text: "📤 Mengunggah ke MEGA.nz..." });
-
-                // Upload ke MEGA.nz
-                const uploaded = await uploadToMega(filePath);
-
-                // Kirim link publik ke WhatsApp
-                await sock.sendMessage(from, {
-                    text: `✅ *Berhasil Mirror!*\n\n📄 Nama: ${uploaded.fileName}\n🔗 Link: ${uploaded.link}`
-                });
-
-                // Hapus file lokal setelah 24 jam
-                setTimeout(() => {
-                    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-                }, 24 * 60 * 60 * 1000);
-            } catch (err) {
-                console.error("❌ Error saat mirror:", err);
-                await sock.sendMessage(from, { text: "❌ Gagal memproses file!" });
-            }
-        }
-    });
+// Pastikan folder download ada
+if (!fs.existsSync(DOWNLOAD_DIR)) {
+  fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
 }
 
-startBot();
+function askQuestion(query) {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout
+  });
+  return new Promise((resolve) =>
+    rl.question(query, (ans) => {
+      rl.close();
+      resolve(ans);
+    })
+  );
+}
+
+async function startBot() {
+  const { state, saveCreds } = await useMultiFileAuthState("./auth");
+  const { version } = await fetchLatestBaileysVersion();
+
+  const sock = makeWASocket({
+    version,
+    logger: pino({ level: "silent" }),
+    printQRInTerminal: false,
+    browser: Browsers.ubuntu("Chrome"),
+    auth: {
+      creds: state.creds,
+      keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "silent" }))
+    }
+  });
+
+  // Tampilkan QR di terminal jika belum login
+  sock.ev.on("connection.update", async (update) => {
+    const { connection, lastDisconnect, qr } = update;
+
+    if (qr) {
+      console.clear();
+      console.log(chalk.cyan("📱 Scan QR untuk login WhatsApp:"));
+      qrcode.generate(qr, { small: true });
+    }
+
+    if (connection === "close") {
+      const reason = lastDisconnect?.error?.output?.statusCode;
+
+      if (reason === DisconnectReason.loggedOut) {
+        console.log(chalk.red("❌ Logged out. Hapus folder auth dan login ulang."));
+        process.exit(1);
+      } else {
+        console.log(chalk.yellow("🔁 Koneksi terputus, mencoba reconnect..."));
+        startBot().catch((err) => console.error("Error restart bot:", err));
+      }
+    } else if (connection === "open") {
+      console.log(chalk.green("✅ Bot terkoneksi ke WhatsApp!"));
+      // Restore timer auto-delete dari database
+      restoreTimers();
+    }
+  });
+
+  sock.ev.on("creds.update", saveCreds);
+
+  sock.ev.on("messages.upsert", async ({ messages, type }) => {
+    if (type !== "notify") return;
+    const msg = messages[0];
+    if (!msg.message) return;
+
+    const from = msg.key.remoteJid;
+    const isFromMe = msg.key.fromMe;
+
+    // Abaikan pesan dari bot sendiri
+    if (isFromMe) return;
+
+    // Ambil teks pesan (dari conversation, extendedText atau caption media)
+    const messageContent =
+      msg.message.conversation ||
+      msg.message.extendedTextMessage?.text ||
+      msg.message.imageMessage?.caption ||
+      msg.message.videoMessage?.caption ||
+      "";
+
+    const body = messageContent.trim();
+    const prefix = ".";
+    const isCmd = body.startsWith(prefix);
+
+    if (!isCmd) return;
+
+    const args = body.slice(prefix.length).trim().split(/\s+/);
+    const command = args.shift()?.toLowerCase() || "";
+
+    if (command === "ping") {
+      return sock.sendMessage(from, { text: "🏓 Pong!" });
+    }
+
+    if (command === "mirror") {
+      if (args.length === 0) {
+        return sock.sendMessage(from, {
+          text: "📎 Kirim: *.mirror <url>*\nContoh: *.mirror https://example.com/file.zip*"
+        });
+      }
+
+      const url = args[0];
+
+      if (!/^https?:\/\//i.test(url)) {
+        return sock.sendMessage(from, {
+          text: "❌ URL tidak valid. Pastikan diawali dengan http:// atau https://"
+        });
+      }
+
+      console.log(`📥 Mirror request dari ${from} -> ${url}`);
+
+      // Tentukan nama file dari URL
+      const urlPath = new URL(url).pathname;
+      let fileName = path.basename(urlPath) || "file.bin";
+
+      // Hindari nama file absurd
+      if (!fileName || !fileName.includes(".")) {
+        fileName = `file-${Date.now()}.bin`;
+      }
+
+      const filePath = path.join(DOWNLOAD_DIR, fileName);
+
+      try {
+        await sock.sendMessage(from, { text: "⏳ Mengunduh file, tunggu sebentar..." });
+
+        // Download file
+        const res = await fetch(url);
+        if (!res.ok) {
+          console.error("Gagal mengunduh, status:", res.status);
+          return sock.sendMessage(from, { text: "❌ Gagal mengunduh file dari URL!" });
+        }
+
+        const fileStream = fs.createWriteStream(filePath);
+        await new Promise((resolve, reject) => {
+          res.body.pipe(fileStream);
+          res.body.on("error", reject);
+          fileStream.on("finish", resolve);
+        });
+
+        await sock.sendMessage(from, { text: "📤 Mengunggah ke MEGA.nz..." });
+
+        // Upload ke MEGA
+        const result = await uploadToMega(filePath, fileName);
+
+        const caption =
+          "✅ *Berhasil mirror ke MEGA.nz!*\n\n" +
+          `📁 *Nama*: ${result.name}\n` +
+          `🔗 *Link*: ${result.link}\n` +
+          "⏱ *Auto delete*: 24 jam\n\n" +
+          "_File lokal akan dihapus otomatis setelah 24 jam._";
+
+        await sock.sendMessage(from, { text: caption });
+
+        // Hapus file lokal setelah 24 jam
+        setTimeout(() => {
+          if (fs.existsSync(filePath)) {
+            try {
+              fs.unlinkSync(filePath);
+              console.log("🧹 File lokal dihapus:", filePath);
+            } catch (err) {
+              console.error("Gagal hapus file lokal:", err);
+            }
+          }
+        }, 24 * 60 * 60 * 1000);
+      } catch (err) {
+        console.error("❌ Error saat mirror:", err);
+        await sock.sendMessage(from, { text: "❌ Gagal memproses file!" });
+      }
+    }
+  });
+}
+
+startBot().catch((err) => {
+  console.error("Fatal error:", err);
+  process.exit(1);
+});
