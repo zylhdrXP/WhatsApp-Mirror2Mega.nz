@@ -1,139 +1,168 @@
-const mega = require("megajs");
+const { Storage } = require("megajs");
 const fs = require("fs");
 const path = require("path");
 const { mega: megaConfig } = require("./config");
 
 const UPLOAD_DB = path.join(__dirname, "uploads.json");
 
-// Fungsi baca database upload
+let storagePromise = null;
+
+// ===== Helper Database Upload =====
 function readUploads() {
-    if (!fs.existsSync(UPLOAD_DB)) return [];
-    return JSON.parse(fs.readFileSync(UPLOAD_DB, "utf-8"));
+  if (!fs.existsSync(UPLOAD_DB)) return [];
+  try {
+    const raw = fs.readFileSync(UPLOAD_DB, "utf-8");
+    return JSON.parse(raw);
+  } catch (err) {
+    console.error("Gagal membaca uploads.json:", err);
+    return [];
+  }
 }
 
-// Fungsi simpan database upload
 function saveUploads(data) {
+  try {
     fs.writeFileSync(UPLOAD_DB, JSON.stringify(data, null, 2));
+  } catch (err) {
+    console.error("Gagal menyimpan uploads.json:", err);
+  }
 }
 
-// Upload file ke MEGA
-async function uploadToMega(filePath) {
-    return new Promise((resolve, reject) => {
-        try {
-            if (!fs.existsSync(filePath)) return reject("❌ File tidak ditemukan!");
+// ===== Helper MEGA Storage =====
+async function getStorage() {
+  if (!storagePromise) {
+    storagePromise = (async () => {
+      if (!megaConfig.email || !megaConfig.password) {
+        throw new Error("Email / password MEGA belum diatur di config.js");
+      }
 
-            const fileName = path.basename(filePath);
-            const fileSize = fs.statSync(filePath).size;
+      const storage = await new Storage({
+        email: megaConfig.email,
+        password: megaConfig.password,
+        keepalive: true
+      }).ready;
 
-            const storage = mega({
-                email: megaConfig.email,
-                password: megaConfig.password
-            });
-
-            storage.on("ready", () => {
-                const upload = storage.upload({
-                    name: fileName,
-                    size: fileSize,
-                    allowUploadBuffering: true
-                }, fs.createReadStream(filePath));
-
-                upload.on("complete", (file) => {
-                    file.link((err, link) => {
-                        if (err) return reject(err);
-
-                        const uploads = readUploads();
-                        const uploadedAt = Date.now();
-                        const fileData = {
-                            id: file.nodeId,
-                            name: fileName,
-                            link,
-                            uploadedAt
-                        };
-                        uploads.push(fileData);
-                        saveUploads(uploads);
-
-                        // Set timer otomatis hapus setelah 24 jam
-                        setTimeout(async () => {
-                            try {
-                                console.log(`⏳ Menghapus otomatis: ${fileName}`);
-                                await deleteFromMega(file.nodeId);
-                                const updated = readUploads().filter(f => f.id !== file.nodeId);
-                                saveUploads(updated);
-                                console.log(`✅ Berhasil dihapus: ${fileName}`);
-                            } catch (err) {
-                                console.error(`❌ Gagal hapus ${fileName}: ${err.message || err}`);
-                            }
-                        }, 24 * 60 * 60 * 1000); // 24 jam
-
-                        resolve({
-                            fileName,
-                            link
-                        });
-                    });
-                });
-
-                upload.on("error", (err) => reject(err));
-            });
-
-            storage.on("error", (err) => reject(err));
-        } catch (err) {
-            reject(err);
-        }
+      console.log("✅ Login ke MEGA.nz berhasil sebagai:", storage.name || megaConfig.email);
+      return storage;
+    })().catch((err) => {
+      storagePromise = null;
+      throw err;
     });
+  }
+  return storagePromise;
 }
 
-// Hapus file dari MEGA
-async function deleteFromMega(fileId) {
-    return new Promise((resolve, reject) => {
-        const storage = mega({
-            email: megaConfig.email,
-            password: megaConfig.password
-        });
+// ===== Operasi ke MEGA =====
+async function uploadToMega(filePath, originalName) {
+  const storage = await getStorage();
 
-        storage.on("ready", () => {
-            const file = storage.files[fileId];
-            if (!file) return reject(new Error("❌ File tidak ditemukan di MEGA!"));
-            file.delete((err) => {
-                if (err) return reject(err);
-                resolve(true);
-            });
-        });
+  const stat = fs.statSync(filePath);
+  const fileName = originalName || path.basename(filePath);
 
-        storage.on("error", (err) => reject(err));
+  console.log("⬆️ Mengunggah ke MEGA:", fileName, stat.size, "bytes");
+
+  const uploadStream = storage.upload(
+    {
+      name: fileName,
+      size: stat.size
+    },
+    fs.createReadStream(filePath)
+  );
+
+  const file = await uploadStream.complete;
+
+  // Dapatkan link publik
+  const link = await new Promise((resolve, reject) => {
+    file.link((err, url) => {
+      if (err) return reject(err);
+      resolve(url);
     });
+  });
+
+  const now = Date.now();
+  const expiresAt = now + 24 * 60 * 60 * 1000;
+
+  const uploads = readUploads();
+  const record = {
+    id: file.nodeId,
+    name: fileName,
+    link,
+    size: stat.size,
+    uploadedAt: now,
+    expiresAt
+  };
+  uploads.push(record);
+  saveUploads(uploads);
+
+  scheduleDelete(record);
+
+  console.log("✅ Upload selesai. Link:", link);
+  return record;
 }
 
-// Restore timer untuk file yang sudah diunggah sebelumnya
+async function deleteFromMega(nodeId) {
+  const storage = await getStorage();
+  const file = storage.files[nodeId];
+
+  if (!file) {
+    console.warn("File tidak ditemukan di MEGA untuk nodeId:", nodeId);
+    return;
+  }
+
+  await new Promise((resolve, reject) => {
+    file.delete((err) => {
+      if (err) return reject(err);
+      resolve();
+    });
+  });
+
+  console.log("🗑 File dihapus dari MEGA:", file.name || nodeId);
+}
+
+// ===== Timer Auto Delete =====
+function scheduleDelete(file) {
+  const now = Date.now();
+  const remaining = file.expiresAt - now;
+
+  if (remaining <= 0) {
+    // Sudah kadaluarsa, hapus langsung
+    performDelete(file).catch((err) =>
+      console.error(`❌ Gagal hapus kadaluarsa ${file.name}:`, err)
+    );
+    return;
+  }
+
+  setTimeout(() => {
+    performDelete(file).catch((err) =>
+      console.error(`❌ Gagal hapus terjadwal ${file.name}:`, err)
+    );
+  }, remaining);
+
+  const minutes = Math.round(remaining / 60000);
+  console.log(`⏱ Jadwalkan auto delete untuk ${file.name} dalam ${minutes} menit`);
+}
+
+async function performDelete(file) {
+  try {
+    await deleteFromMega(file.id);
+  } finally {
+    const uploads = readUploads().filter((f) => f.id !== file.id);
+    saveUploads(uploads);
+  }
+}
+
+// Dipanggil saat bot start ulang
 function restoreTimers() {
-    const uploads = readUploads();
-    const now = Date.now();
+  const uploads = readUploads();
+  if (!uploads.length) {
+    console.log("Tidak ada upload tertunda untuk dipulihkan.");
+    return;
+  }
 
-    uploads.forEach(file => {
-        const remaining = (file.uploadedAt + 24 * 60 * 60 * 1000) - now;
-        if (remaining <= 0) {
-            // Sudah kadaluarsa, hapus langsung
-            deleteFromMega(file.id)
-                .then(() => {
-                    console.log(`🗑 File kadaluarsa dihapus: ${file.name}`);
-                    const updated = readUploads().filter(f => f.id !== file.id);
-                    saveUploads(updated);
-                })
-                .catch(err => console.error(`❌ Gagal hapus ${file.name}: ${err.message || err}`));
-        } else {
-            // Set ulang timer sisanya
-            console.log(`⏳ Set ulang timer untuk ${file.name} (sisa ${(remaining / 1000 / 60).toFixed(1)} menit)`);
-            setTimeout(async () => {
-                try {
-                    await deleteFromMega(file.id);
-                    const updated = readUploads().filter(f => f.id !== file.id);
-                    saveUploads(updated);
-                    console.log(`✅ Berhasil dihapus: ${file.name}`);
-                } catch (err) {
-                    console.error(`❌ Gagal hapus ${file.name}: ${err.message || err}`);
-                }
-            }, remaining);
-        }
-    });
+  console.log(`🔁 Restore ${uploads.length} timer auto delete dari uploads.json`);
+
+  uploads.forEach((file) => {
+    scheduleDelete(file);
+  });
 }
 
 module.exports = { uploadToMega, restoreTimers };
